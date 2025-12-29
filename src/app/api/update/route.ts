@@ -16,6 +16,8 @@ export async function POST(request: NextRequest) {
       includeErrors?: boolean;
     };
 
+    console.log('[Update API] Request:', { routerIds: routerIds?.length, batchSize, includeErrors });
+
     const globalCreds = settingsDb.getGlobalCredentials();
     const waitTimeMinutes = settingsDb.getBatchWaitTime();
 
@@ -23,17 +25,22 @@ export async function POST(request: NextRequest) {
     let routers: Router[];
     if (routerIds && routerIds.length > 0) {
       routers = routerIds.map(id => routerDb.getById(id)).filter((r): r is Router => r !== undefined);
+      console.log('[Update API] Using selected routers:', routers.length);
     } else {
       // Get all routers with available updates
       routers = routerDb.getByStatus('update_available');
+      console.log('[Update API] Routers with update_available:', routers.length);
 
       // Also include error/unreachable routers if requested (for retry)
       if (includeErrors) {
         const errorRouters = routerDb.getByStatus('error');
         const unreachableRouters = routerDb.getByStatus('unreachable');
+        console.log('[Update API] Adding error routers:', errorRouters.length, 'unreachable:', unreachableRouters.length);
         routers = [...routers, ...errorRouters, ...unreachableRouters];
       }
     }
+
+    console.log('[Update API] Total routers to update:', routers.length);
 
     if (routers.length === 0) {
       return NextResponse.json({

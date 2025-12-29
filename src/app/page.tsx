@@ -345,6 +345,8 @@ export default function Home() {
   const handleStartUpdate = async () => {
     const routerIds = selectedRouters.size > 0 ? Array.from(selectedRouters) : undefined;
 
+    console.log('[Frontend] Starting update with:', { routerIds: routerIds?.length, batchSize, includeErrors });
+
     setIsLoading(true);
     setMessage(null);
     setLiveEvents([]);
