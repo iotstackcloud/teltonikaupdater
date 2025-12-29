@@ -1,36 +1,132 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Teltonika Firmware Updater
 
-## Getting Started
+Web-basierte Anwendung zur Verwaltung und Durchfuehrung von Massen-Firmware-Updates auf Teltonika Routern.
 
-First, run the development server:
+## Features
+
+- **Excel-Import**: Router-Listen aus Excel importieren (Geraetename, IP-Adresse, User, Passwort)
+- **Globale Credentials**: Zentrale Zugangsdaten fuer alle Router ohne individuelle Credentials
+- **Firmware-Check**: Automatische Pruefung des Firmware-Status aller Router via SSH
+- **Batch-Updates**: Updates in konfigurierbaren Batches (5, 10, 25, 100 Router)
+- **10 Minuten Pause**: Automatische Wartezeit zwischen Batches zur Netzwerkstabilisierung
+- **SQLite-Datenbank**: Persistente Speicherung aller Router und Update-Historie
+- **Fehler-Tracking**: Dokumentation von Fehlern (nicht erreichbar, Update fehlgeschlagen, etc.)
+- **Update-Historie**: Vollstaendige Protokollierung mit Firmware vorher/nachher und Zeitstempel
+
+## Voraussetzungen
+
+- Node.js 18+
+- SSH-Zugang zu den Teltonika Routern (Port 22)
+- Teltonika Router mit RutOS (getestet mit RUT955, RUT950, RUT240, etc.)
+
+## Installation
 
 ```bash
+# Repository klonen
+git clone git@github.com:iotstackcloud/teltonikaupdater.git
+cd teltonikaupdater
+
+# Dependencies installieren
+npm install
+
+# Development Server starten
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Die Anwendung ist dann unter http://localhost:3000 erreichbar.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Verwendung
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 1. Globale Credentials konfigurieren
 
-## Learn More
+Unter **Einstellungen** koennen globale SSH-Zugangsdaten hinterlegt werden, die fuer alle Router ohne individuelle Credentials verwendet werden.
 
-To learn more about Next.js, take a look at the following resources:
+### 2. Router importieren
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Excel-Datei mit folgender Struktur vorbereiten:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Geraetename | IP-Adresse | User | Passwort |
+|-------------|------------|------|----------|
+| Router001   | 10.0.1.1   |      |          |
+| Router002   | 10.0.1.2   | root | secret   |
 
-## Deploy on Vercel
+- **Geraetename**: Eindeutiger Name des Routers
+- **IP-Adresse**: IP-Adresse des Routers
+- **User**: Optional - SSH-Benutzername (Standard: globale Credentials)
+- **Passwort**: Optional - SSH-Passwort (Standard: globale Credentials)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### 3. Firmware-Status pruefen
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Mit **"Alle pruefen"** wird der aktuelle Firmware-Stand und verfuegbare Updates fuer alle Router ermittelt.
+
+### 4. Updates durchfuehren
+
+1. Batch-Groesse waehlen (5, 10, 25 oder 100)
+2. **"Updates starten"** klicken
+3. Die Anwendung aktualisiert Router in Batches mit 10 Minuten Pause dazwischen
+4. Fortschritt wird live im Dashboard angezeigt
+
+## API Endpoints
+
+| Endpoint | Methode | Beschreibung |
+|----------|---------|--------------|
+| `/api/routers` | GET | Alle Router abrufen |
+| `/api/routers` | DELETE | Alle Router loeschen |
+| `/api/routers/check` | POST | Firmware-Status pruefen |
+| `/api/import` | POST | Excel-Import |
+| `/api/settings` | GET/POST | Globale Credentials |
+| `/api/update` | GET/POST/DELETE | Batch-Updates verwalten |
+| `/api/history` | GET | Update-Historie |
+
+## Technologie-Stack
+
+- **Frontend**: Next.js 16, React, Tailwind CSS
+- **Backend**: Next.js API Routes
+- **Datenbank**: SQLite (better-sqlite3)
+- **SSH**: ssh2 Library
+
+## Projektstruktur
+
+```
+src/
+├── app/
+│   ├── api/
+│   │   ├── import/route.ts       # Excel-Import
+│   │   ├── routers/
+│   │   │   ├── route.ts          # Router CRUD
+│   │   │   └── check/route.ts    # Firmware-Check
+│   │   ├── settings/route.ts     # Credentials
+│   │   ├── update/route.ts       # Batch-Updates
+│   │   └── history/route.ts      # Historie
+│   └── page.tsx                  # Dashboard UI
+└── lib/
+    ├── db.ts                     # SQLite Schema & Queries
+    └── ssh-service.ts            # SSH Kommunikation
+```
+
+## Datenbank-Schema
+
+### routers
+- `id`: UUID
+- `device_name`: Geraetename
+- `ip_address`: IP-Adresse
+- `username`: SSH User
+- `password`: SSH Passwort
+- `current_firmware`: Aktuelle Firmware
+- `available_firmware`: Verfuegbare Firmware
+- `status`: unknown | up_to_date | update_available | updating | unreachable | error
+- `last_check`: Letzter Check-Zeitpunkt
+
+### update_history
+- `id`: UUID
+- `router_id`: Referenz zum Router
+- `firmware_before`: Firmware vor Update
+- `firmware_after`: Firmware nach Update
+- `status`: running | success | failed
+- `error_message`: Fehlermeldung
+- `started_at`: Start-Zeitpunkt
+- `completed_at`: Ende-Zeitpunkt
+
+## Lizenz
+
+MIT

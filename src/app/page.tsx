@@ -1,65 +1,713 @@
-import Image from "next/image";
+'use client';
+
+import { useState, useEffect, useCallback } from 'react';
+
+interface Router {
+  id: string;
+  device_name: string;
+  ip_address: string;
+  username: string | null;
+  password: string | null;
+  current_firmware: string | null;
+  available_firmware: string | null;
+  last_check: string | null;
+  status: string;
+}
+
+interface BatchJob {
+  id: string;
+  status: string;
+  batch_size: number;
+  total_routers: number;
+  completed_routers: number;
+  failed_routers: number;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+interface UpdateHistory {
+  id: string;
+  router_id: string;
+  device_name: string;
+  ip_address: string;
+  firmware_before: string | null;
+  firmware_after: string | null;
+  status: string;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
 
 export default function Home() {
+  const [routers, setRouters] = useState<Router[]>([]);
+  const [stats, setStats] = useState<{ status: string; count: number }[]>([]);
+  const [activeJob, setActiveJob] = useState<BatchJob | null>(null);
+  const [history, setHistory] = useState<UpdateHistory[]>([]);
+  const [selectedRouters, setSelectedRouters] = useState<Set<string>>(new Set());
+  const [batchSize, setBatchSize] = useState(5);
+  const [isLoading, setIsLoading] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Settings state
+  const [globalUsername, setGlobalUsername] = useState('');
+  const [globalPassword, setGlobalPassword] = useState('');
+  const [hasGlobalCreds, setHasGlobalCreds] = useState(false);
+
+  // Tab state
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'routers' | 'history' | 'settings'>('dashboard');
+
+  const fetchRouters = useCallback(async () => {
+    try {
+      const res = await fetch('/api/routers');
+      const data = await res.json();
+      setRouters(data.routers || []);
+      setStats(data.stats || []);
+    } catch (error) {
+      console.error('Failed to fetch routers:', error);
+    }
+  }, []);
+
+  const fetchActiveJob = useCallback(async () => {
+    try {
+      const res = await fetch('/api/update');
+      const data = await res.json();
+      setActiveJob(data.activeJob || null);
+    } catch (error) {
+      console.error('Failed to fetch active job:', error);
+    }
+  }, []);
+
+  const fetchHistory = useCallback(async () => {
+    try {
+      const res = await fetch('/api/history?limit=50');
+      const data = await res.json();
+      setHistory(data.history || []);
+    } catch (error) {
+      console.error('Failed to fetch history:', error);
+    }
+  }, []);
+
+  const fetchSettings = useCallback(async () => {
+    try {
+      const res = await fetch('/api/settings');
+      const data = await res.json();
+      setHasGlobalCreds(data.hasGlobalCredentials);
+      if (data.username) {
+        setGlobalUsername(data.username);
+      }
+    } catch (error) {
+      console.error('Failed to fetch settings:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRouters();
+    fetchActiveJob();
+    fetchHistory();
+    fetchSettings();
+
+    // Poll for active job status
+    const interval = setInterval(() => {
+      if (activeJob) {
+        fetchActiveJob();
+        fetchRouters();
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [fetchRouters, fetchActiveJob, fetchHistory, fetchSettings, activeJob]);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsLoading(true);
+    setMessage(null);
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('clearExisting', 'true');
+
+    try {
+      const res = await fetch('/api/import', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        setMessage({ type: 'success', text: `${data.imported} Router importiert` });
+        fetchRouters();
+      } else {
+        setMessage({ type: 'error', text: data.error || 'Import fehlgeschlagen' });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Import fehlgeschlagen' });
+    } finally {
+      setIsLoading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleSaveCredentials = async () => {
+    if (!globalUsername || !globalPassword) {
+      setMessage({ type: 'error', text: 'Benutzername und Passwort erforderlich' });
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: globalUsername, password: globalPassword })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        setMessage({ type: 'success', text: 'Zugangsdaten gespeichert' });
+        setHasGlobalCreds(true);
+        fetchSettings();
+      } else {
+        setMessage({ type: 'error', text: data.error });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Speichern fehlgeschlagen' });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCheckFirmware = async (routerIds?: string[]) => {
+    setIsLoading(true);
+    setMessage(null);
+
+    try {
+      const res = await fetch('/api/routers/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ routerIds })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        setMessage({ type: 'success', text: `${data.checked} Router geprüft` });
+        fetchRouters();
+      } else {
+        setMessage({ type: 'error', text: data.error });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Prüfung fehlgeschlagen' });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleStartUpdate = async () => {
+    const routerIds = selectedRouters.size > 0 ? Array.from(selectedRouters) : undefined;
+
+    setIsLoading(true);
+    setMessage(null);
+
+    try {
+      const res = await fetch('/api/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ routerIds, batchSize })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        setMessage({ type: 'success', text: `Update-Job gestartet: ${data.totalRouters} Router in Batches von ${data.batchSize}` });
+        setSelectedRouters(new Set());
+        fetchActiveJob();
+      } else {
+        setMessage({ type: 'error', text: data.error });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Update fehlgeschlagen' });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCancelJob = async () => {
+    if (!activeJob) return;
+
+    try {
+      const res = await fetch(`/api/update?jobId=${activeJob.id}`, { method: 'DELETE' });
+      const data = await res.json();
+
+      if (data.success) {
+        setMessage({ type: 'success', text: 'Job abgebrochen' });
+        fetchActiveJob();
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Abbruch fehlgeschlagen' });
+    }
+  };
+
+  const toggleRouterSelection = (id: string) => {
+    const newSelection = new Set(selectedRouters);
+    if (newSelection.has(id)) {
+      newSelection.delete(id);
+    } else {
+      newSelection.add(id);
+    }
+    setSelectedRouters(newSelection);
+  };
+
+  const selectAllUpdateable = () => {
+    const updateable = routers.filter(r => r.status === 'update_available').map(r => r.id);
+    setSelectedRouters(new Set(updateable));
+  };
+
+  const getStatusBadge = (status: string) => {
+    const styles: Record<string, string> = {
+      'unknown': 'bg-gray-500',
+      'up_to_date': 'bg-green-500',
+      'update_available': 'bg-yellow-500',
+      'updating': 'bg-blue-500 animate-pulse',
+      'unreachable': 'bg-red-500',
+      'error': 'bg-red-700'
+    };
+    const labels: Record<string, string> = {
+      'unknown': 'Unbekannt',
+      'up_to_date': 'Aktuell',
+      'update_available': 'Update verfügbar',
+      'updating': 'Update läuft...',
+      'unreachable': 'Nicht erreichbar',
+      'error': 'Fehler'
+    };
+    return (
+      <span className={`px-2 py-1 rounded text-white text-xs ${styles[status] || 'bg-gray-500'}`}>
+        {labels[status] || status}
+      </span>
+    );
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <main className="min-h-screen bg-gray-900 text-white">
+      {/* Header */}
+      <header className="bg-gray-800 border-b border-gray-700 p-4">
+        <div className="max-w-7xl mx-auto flex justify-between items-center">
+          <h1 className="text-2xl font-bold">Teltonika Firmware Updater</h1>
+          <div className="flex gap-4">
+            <span className="text-gray-400">Router: {routers.length}</span>
+            {hasGlobalCreds && <span className="text-green-400">Credentials: OK</span>}
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+      </header>
+
+      {/* Message */}
+      {message && (
+        <div className={`p-4 ${message.type === 'success' ? 'bg-green-800' : 'bg-red-800'}`}>
+          <div className="max-w-7xl mx-auto">{message.text}</div>
         </div>
-      </main>
-    </div>
+      )}
+
+      {/* Active Job Banner */}
+      {activeJob && activeJob.status === 'running' && (
+        <div className="bg-blue-800 p-4">
+          <div className="max-w-7xl mx-auto flex justify-between items-center">
+            <div>
+              <span className="font-bold">Update läuft:</span>{' '}
+              {activeJob.completed_routers + activeJob.failed_routers} / {activeJob.total_routers} Router
+              {activeJob.failed_routers > 0 && (
+                <span className="text-red-300 ml-2">({activeJob.failed_routers} fehlgeschlagen)</span>
+              )}
+            </div>
+            <button
+              onClick={handleCancelJob}
+              className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded"
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div className="bg-gray-800 border-b border-gray-700">
+        <div className="max-w-7xl mx-auto flex">
+          {['dashboard', 'routers', 'history', 'settings'].map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab as typeof activeTab)}
+              className={`px-6 py-3 font-medium ${
+                activeTab === tab
+                  ? 'text-white border-b-2 border-blue-500'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              {tab === 'dashboard' && 'Dashboard'}
+              {tab === 'routers' && 'Router'}
+              {tab === 'history' && 'Historie'}
+              {tab === 'settings' && 'Einstellungen'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto p-6">
+        {/* Dashboard Tab */}
+        {activeTab === 'dashboard' && (
+          <div className="space-y-6">
+            {/* Stats */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="bg-gray-800 p-4 rounded-lg">
+                <div className="text-3xl font-bold">{routers.length}</div>
+                <div className="text-gray-400">Gesamt</div>
+              </div>
+              <div className="bg-gray-800 p-4 rounded-lg">
+                <div className="text-3xl font-bold text-green-400">
+                  {stats.find(s => s.status === 'up_to_date')?.count || 0}
+                </div>
+                <div className="text-gray-400">Aktuell</div>
+              </div>
+              <div className="bg-gray-800 p-4 rounded-lg">
+                <div className="text-3xl font-bold text-yellow-400">
+                  {stats.find(s => s.status === 'update_available')?.count || 0}
+                </div>
+                <div className="text-gray-400">Update verfügbar</div>
+              </div>
+              <div className="bg-gray-800 p-4 rounded-lg">
+                <div className="text-3xl font-bold text-red-400">
+                  {(stats.find(s => s.status === 'unreachable')?.count || 0) +
+                   (stats.find(s => s.status === 'error')?.count || 0)}
+                </div>
+                <div className="text-gray-400">Fehler</div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="bg-gray-800 p-6 rounded-lg space-y-4">
+              <h2 className="text-xl font-bold">Aktionen</h2>
+
+              <div className="flex flex-wrap gap-4">
+                <label className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded cursor-pointer">
+                  Excel importieren
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    disabled={isLoading}
+                  />
+                </label>
+
+                <button
+                  onClick={() => handleCheckFirmware()}
+                  disabled={isLoading || routers.length === 0}
+                  className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded disabled:opacity-50"
+                >
+                  Alle prüfen
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <select
+                    value={batchSize}
+                    onChange={e => setBatchSize(Number(e.target.value))}
+                    className="bg-gray-700 px-3 py-2 rounded"
+                  >
+                    <option value={5}>5 pro Batch</option>
+                    <option value={10}>10 pro Batch</option>
+                    <option value={25}>25 pro Batch</option>
+                    <option value={100}>100 pro Batch</option>
+                  </select>
+
+                  <button
+                    onClick={handleStartUpdate}
+                    disabled={isLoading || activeJob !== null ||
+                      (stats.find(s => s.status === 'update_available')?.count || 0) === 0}
+                    className="bg-orange-600 hover:bg-orange-700 px-4 py-2 rounded disabled:opacity-50"
+                  >
+                    Updates starten
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Recent History */}
+            <div className="bg-gray-800 p-6 rounded-lg">
+              <h2 className="text-xl font-bold mb-4">Letzte Updates</h2>
+              {history.length === 0 ? (
+                <p className="text-gray-400">Keine Updates durchgeführt</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-gray-400">
+                        <th className="p-2">Gerät</th>
+                        <th className="p-2">Vorher</th>
+                        <th className="p-2">Nachher</th>
+                        <th className="p-2">Status</th>
+                        <th className="p-2">Zeitpunkt</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {history.slice(0, 10).map(h => (
+                        <tr key={h.id} className="border-t border-gray-700">
+                          <td className="p-2">{h.device_name}</td>
+                          <td className="p-2 text-gray-400">{h.firmware_before || '-'}</td>
+                          <td className="p-2 text-green-400">{h.firmware_after || '-'}</td>
+                          <td className="p-2">
+                            {h.status === 'success' ? (
+                              <span className="text-green-400">Erfolgreich</span>
+                            ) : h.status === 'failed' ? (
+                              <span className="text-red-400" title={h.error_message || ''}>
+                                Fehlgeschlagen
+                              </span>
+                            ) : (
+                              <span className="text-blue-400">Läuft...</span>
+                            )}
+                          </td>
+                          <td className="p-2 text-gray-400">
+                            {h.completed_at ? new Date(h.completed_at).toLocaleString('de-DE') : '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Routers Tab */}
+        {activeTab === 'routers' && (
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="text-xl font-bold">Router ({routers.length})</h2>
+              <div className="flex gap-2">
+                <button
+                  onClick={selectAllUpdateable}
+                  className="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-sm"
+                >
+                  Updatebare auswählen
+                </button>
+                <button
+                  onClick={() => setSelectedRouters(new Set())}
+                  className="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-sm"
+                >
+                  Auswahl löschen
+                </button>
+                {selectedRouters.size > 0 && (
+                  <>
+                    <button
+                      onClick={() => handleCheckFirmware(Array.from(selectedRouters))}
+                      disabled={isLoading}
+                      className="bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm disabled:opacity-50"
+                    >
+                      Ausgewählte prüfen ({selectedRouters.size})
+                    </button>
+                    <button
+                      onClick={handleStartUpdate}
+                      disabled={isLoading || activeJob !== null}
+                      className="bg-orange-600 hover:bg-orange-700 px-3 py-1 rounded text-sm disabled:opacity-50"
+                    >
+                      Ausgewählte updaten ({selectedRouters.size})
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="bg-gray-800 rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-400 bg-gray-900">
+                    <th className="p-3 w-10">
+                      <input
+                        type="checkbox"
+                        checked={selectedRouters.size === routers.length && routers.length > 0}
+                        onChange={() => {
+                          if (selectedRouters.size === routers.length) {
+                            setSelectedRouters(new Set());
+                          } else {
+                            setSelectedRouters(new Set(routers.map(r => r.id)));
+                          }
+                        }}
+                      />
+                    </th>
+                    <th className="p-3">Gerätename</th>
+                    <th className="p-3">IP-Adresse</th>
+                    <th className="p-3">Aktuelle FW</th>
+                    <th className="p-3">Verfügbare FW</th>
+                    <th className="p-3">Status</th>
+                    <th className="p-3">Zuletzt geprüft</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {routers.map(router => (
+                    <tr
+                      key={router.id}
+                      className={`border-t border-gray-700 hover:bg-gray-700 ${
+                        selectedRouters.has(router.id) ? 'bg-gray-700' : ''
+                      }`}
+                    >
+                      <td className="p-3">
+                        <input
+                          type="checkbox"
+                          checked={selectedRouters.has(router.id)}
+                          onChange={() => toggleRouterSelection(router.id)}
+                        />
+                      </td>
+                      <td className="p-3 font-medium">{router.device_name}</td>
+                      <td className="p-3 text-gray-400">{router.ip_address}</td>
+                      <td className="p-3">{router.current_firmware || '-'}</td>
+                      <td className="p-3 text-yellow-400">{router.available_firmware || '-'}</td>
+                      <td className="p-3">{getStatusBadge(router.status)}</td>
+                      <td className="p-3 text-gray-400">
+                        {router.last_check
+                          ? new Date(router.last_check).toLocaleString('de-DE')
+                          : '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* History Tab */}
+        {activeTab === 'history' && (
+          <div className="space-y-4">
+            <h2 className="text-xl font-bold">Update-Historie</h2>
+
+            <div className="bg-gray-800 rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-400 bg-gray-900">
+                    <th className="p-3">Gerät</th>
+                    <th className="p-3">IP</th>
+                    <th className="p-3">Firmware vorher</th>
+                    <th className="p-3">Firmware nachher</th>
+                    <th className="p-3">Status</th>
+                    <th className="p-3">Fehler</th>
+                    <th className="p-3">Gestartet</th>
+                    <th className="p-3">Beendet</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map(h => (
+                    <tr key={h.id} className="border-t border-gray-700">
+                      <td className="p-3 font-medium">{h.device_name}</td>
+                      <td className="p-3 text-gray-400">{h.ip_address}</td>
+                      <td className="p-3">{h.firmware_before || '-'}</td>
+                      <td className="p-3 text-green-400">{h.firmware_after || '-'}</td>
+                      <td className="p-3">
+                        {h.status === 'success' ? (
+                          <span className="text-green-400">Erfolgreich</span>
+                        ) : h.status === 'failed' ? (
+                          <span className="text-red-400">Fehlgeschlagen</span>
+                        ) : (
+                          <span className="text-blue-400">Läuft...</span>
+                        )}
+                      </td>
+                      <td className="p-3 text-red-400 max-w-xs truncate" title={h.error_message || ''}>
+                        {h.error_message || '-'}
+                      </td>
+                      <td className="p-3 text-gray-400">
+                        {h.started_at ? new Date(h.started_at).toLocaleString('de-DE') : '-'}
+                      </td>
+                      <td className="p-3 text-gray-400">
+                        {h.completed_at ? new Date(h.completed_at).toLocaleString('de-DE') : '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Settings Tab */}
+        {activeTab === 'settings' && (
+          <div className="space-y-6">
+            <h2 className="text-xl font-bold">Einstellungen</h2>
+
+            <div className="bg-gray-800 p-6 rounded-lg max-w-lg">
+              <h3 className="text-lg font-semibold mb-4">Globale Zugangsdaten</h3>
+              <p className="text-gray-400 mb-4">
+                Diese Zugangsdaten werden verwendet, wenn Router keine individuellen Credentials haben.
+              </p>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Benutzername</label>
+                  <input
+                    type="text"
+                    value={globalUsername}
+                    onChange={e => setGlobalUsername(e.target.value)}
+                    className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2"
+                    placeholder="root"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Passwort</label>
+                  <input
+                    type="password"
+                    value={globalPassword}
+                    onChange={e => setGlobalPassword(e.target.value)}
+                    className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2"
+                    placeholder="Passwort"
+                  />
+                </div>
+                <button
+                  onClick={handleSaveCredentials}
+                  disabled={isLoading}
+                  className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded disabled:opacity-50"
+                >
+                  Speichern
+                </button>
+                {hasGlobalCreds && (
+                  <p className="text-green-400 text-sm">Zugangsdaten sind konfiguriert</p>
+                )}
+              </div>
+            </div>
+
+            <div className="bg-gray-800 p-6 rounded-lg max-w-lg">
+              <h3 className="text-lg font-semibold mb-4">Batch-Einstellungen</h3>
+              <p className="text-gray-400 mb-4">
+                Nach jedem Batch wird 10 Minuten gewartet, bevor der nächste Batch startet.
+              </p>
+              <div>
+                <label className="block text-sm font-medium mb-1">Standard Batch-Größe</label>
+                <select
+                  value={batchSize}
+                  onChange={e => setBatchSize(Number(e.target.value))}
+                  className="bg-gray-700 border border-gray-600 rounded px-3 py-2"
+                >
+                  <option value={5}>5 Router pro Batch</option>
+                  <option value={10}>10 Router pro Batch</option>
+                  <option value={25}>25 Router pro Batch</option>
+                  <option value={100}>100 Router pro Batch</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="bg-gray-800 p-6 rounded-lg max-w-lg">
+              <h3 className="text-lg font-semibold mb-4 text-red-400">Gefahrenzone</h3>
+              <button
+                onClick={async () => {
+                  if (confirm('Alle Router löschen?')) {
+                    await fetch('/api/routers', { method: 'DELETE' });
+                    fetchRouters();
+                    setMessage({ type: 'success', text: 'Alle Router gelöscht' });
+                  }
+                }}
+                className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded"
+              >
+                Alle Router löschen
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </main>
   );
 }
