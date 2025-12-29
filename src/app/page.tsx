@@ -47,6 +47,12 @@ interface LiveEvent {
   level: 'info' | 'success' | 'warning' | 'error';
 }
 
+interface FirmwareVersion {
+  device_prefix: string;
+  latest_version: string;
+  updated_at: string;
+}
+
 export default function Home() {
   const [routers, setRouters] = useState<Router[]>([]);
   const [stats, setStats] = useState<{ status: string; count: number }[]>([]);
@@ -68,6 +74,11 @@ export default function Home() {
   const [globalUsername, setGlobalUsername] = useState('');
   const [globalPassword, setGlobalPassword] = useState('');
   const [hasGlobalCreds, setHasGlobalCreds] = useState(false);
+
+  // Firmware versions state
+  const [firmwareVersions, setFirmwareVersions] = useState<FirmwareVersion[]>([]);
+  const [newFwPrefix, setNewFwPrefix] = useState('');
+  const [newFwVersion, setNewFwVersion] = useState('');
 
   // Tab state
   const [activeTab, setActiveTab] = useState<'dashboard' | 'routers' | 'history' | 'settings'>('dashboard');
@@ -215,17 +226,28 @@ export default function Home() {
     }
   }, []);
 
+  const fetchFirmwareVersions = useCallback(async () => {
+    try {
+      const res = await fetch('/api/firmware-versions');
+      const data = await res.json();
+      setFirmwareVersions(data.versions || []);
+    } catch (error) {
+      console.error('Failed to fetch firmware versions:', error);
+    }
+  }, []);
+
   useEffect(() => {
     fetchRouters();
     fetchActiveJob();
     fetchHistory();
     fetchSettings();
+    fetchFirmwareVersions();
     connectToEventStream();
 
     return () => {
       eventSourceRef.current?.close();
     };
-  }, [fetchRouters, fetchActiveJob, fetchHistory, fetchSettings, connectToEventStream]);
+  }, [fetchRouters, fetchActiveJob, fetchHistory, fetchSettings, fetchFirmwareVersions, connectToEventStream]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -847,6 +869,107 @@ export default function Home() {
                   <option value={25}>25 Router pro Batch</option>
                   <option value={100}>100 Router pro Batch</option>
                 </select>
+              </div>
+            </div>
+
+            {/* Firmware Versions */}
+            <div className="bg-gray-800 p-6 rounded-lg">
+              <h3 className="text-lg font-semibold mb-4">Firmware-Versionen</h3>
+              <p className="text-gray-400 mb-4">
+                Hier die neuesten Firmware-Versionen pro Gerätetyp pflegen. Diese werden verwendet,
+                wenn der Router keine Update-Informationen vom FOTA-Server abrufen kann.
+              </p>
+
+              {/* Add new version */}
+              <div className="flex gap-2 mb-4">
+                <input
+                  type="text"
+                  value={newFwPrefix}
+                  onChange={e => setNewFwPrefix(e.target.value.toUpperCase())}
+                  className="bg-gray-700 border border-gray-600 rounded px-3 py-2 w-32"
+                  placeholder="z.B. RUT9"
+                />
+                <input
+                  type="text"
+                  value={newFwVersion}
+                  onChange={e => setNewFwVersion(e.target.value)}
+                  className="bg-gray-700 border border-gray-600 rounded px-3 py-2 flex-1"
+                  placeholder="z.B. RUT9_R_00.07.06.20"
+                />
+                <button
+                  onClick={async () => {
+                    if (!newFwPrefix || !newFwVersion) {
+                      setMessage({ type: 'error', text: 'Prefix und Version erforderlich' });
+                      return;
+                    }
+                    try {
+                      const res = await fetch('/api/firmware-versions', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ device_prefix: newFwPrefix, latest_version: newFwVersion })
+                      });
+                      const data = await res.json();
+                      if (data.success) {
+                        setMessage({ type: 'success', text: `Firmware-Version für ${newFwPrefix} gespeichert` });
+                        setNewFwPrefix('');
+                        setNewFwVersion('');
+                        fetchFirmwareVersions();
+                      } else {
+                        setMessage({ type: 'error', text: data.error });
+                      }
+                    } catch {
+                      setMessage({ type: 'error', text: 'Speichern fehlgeschlagen' });
+                    }
+                  }}
+                  className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded"
+                >
+                  Hinzufügen
+                </button>
+              </div>
+
+              {/* Versions table */}
+              {firmwareVersions.length > 0 ? (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-gray-400 border-b border-gray-700">
+                      <th className="pb-2">Gerätetyp</th>
+                      <th className="pb-2">Neueste Version</th>
+                      <th className="pb-2">Aktualisiert</th>
+                      <th className="pb-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {firmwareVersions.map(fw => (
+                      <tr key={fw.device_prefix} className="border-b border-gray-700">
+                        <td className="py-2 font-medium">{fw.device_prefix}</td>
+                        <td className="py-2 text-green-400">{fw.latest_version}</td>
+                        <td className="py-2 text-gray-400">
+                          {new Date(fw.updated_at).toLocaleString('de-DE')}
+                        </td>
+                        <td className="py-2 text-right">
+                          <button
+                            onClick={async () => {
+                              if (confirm(`${fw.device_prefix} löschen?`)) {
+                                await fetch(`/api/firmware-versions?prefix=${fw.device_prefix}`, { method: 'DELETE' });
+                                fetchFirmwareVersions();
+                              }
+                            }}
+                            className="text-red-400 hover:text-red-300"
+                          >
+                            Löschen
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="text-gray-500">Keine Firmware-Versionen konfiguriert</p>
+              )}
+
+              <div className="mt-4 p-3 bg-gray-700 rounded text-sm text-gray-300">
+                <strong>Tipp:</strong> Gängige Präfixe sind RUT9 (RUT955, RUT950), RUT2 (RUT240, RUT241),
+                RUTX (RUTX09, RUTX11), TRB1 (TRB140, TRB142)
               </div>
             </div>
 

@@ -1,4 +1,5 @@
 import { Client } from 'ssh2';
+import { firmwareVersionDb } from './db';
 
 export interface SSHCredentials {
   host: string;
@@ -144,14 +145,25 @@ export async function getFirmwareInfo(credentials: SSHCredentials): Promise<Firm
 
     // Get available firmware from FOTA service
     let available: string | null = null;
+    let fotaAvailable = false;
+
     try {
       const fotaInfo = await executeSSHCommand(credentials, 'ubus call rut_fota get_info');
       const parsed = JSON.parse(fotaInfo);
       if (parsed.fw && parsed.fw !== 'Fw_newest') {
         available = parsed.fw;
+        fotaAvailable = true;
       }
     } catch {
       // FOTA info not available
+    }
+
+    // If FOTA didn't return an update, check against our managed firmware versions
+    if (!fotaAvailable && current) {
+      const versionCheck = firmwareVersionDb.isUpdateAvailable(current);
+      if (versionCheck.available && versionCheck.latestVersion) {
+        available = versionCheck.latestVersion;
+      }
     }
 
     return {

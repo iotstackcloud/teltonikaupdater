@@ -61,6 +61,13 @@ db.exec(`
     completed_at DATETIME
   );
 
+  -- Firmware versions table (latest versions per device type)
+  CREATE TABLE IF NOT EXISTS firmware_versions (
+    device_prefix TEXT PRIMARY KEY,
+    latest_version TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
   -- Create indexes
   CREATE INDEX IF NOT EXISTS idx_routers_status ON routers(status);
   CREATE INDEX IF NOT EXISTS idx_update_history_router ON update_history(router_id);
@@ -105,6 +112,12 @@ export interface BatchJob {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+}
+
+export interface FirmwareVersion {
+  device_prefix: string;
+  latest_version: string;
+  updated_at: string;
 }
 
 // Database operations
@@ -249,5 +262,64 @@ export const batchJobDb = {
     const fields = Object.keys(updates).map(k => `${k} = ?`).join(', ');
     const values = Object.values(updates);
     db.prepare(`UPDATE batch_jobs SET ${fields} WHERE id = ?`).run(...values, id);
+  }
+};
+
+export const firmwareVersionDb = {
+  getAll: (): FirmwareVersion[] => {
+    return db.prepare('SELECT * FROM firmware_versions ORDER BY device_prefix').all() as FirmwareVersion[];
+  },
+
+  getByPrefix: (prefix: string): FirmwareVersion | undefined => {
+    return db.prepare('SELECT * FROM firmware_versions WHERE device_prefix = ?').get(prefix) as FirmwareVersion | undefined;
+  },
+
+  getLatestForFirmware: (currentFirmware: string): string | null => {
+    // Extract prefix from firmware string (e.g., "RUT9_R_00.07.06.11" -> "RUT9")
+    const match = currentFirmware.match(/^([A-Z0-9]+)_/);
+    if (!match) return null;
+
+    const prefix = match[1];
+    const version = firmwareVersionDb.getByPrefix(prefix);
+    return version?.latest_version ?? null;
+  },
+
+  upsert: (prefix: string, latestVersion: string): void => {
+    db.prepare(`
+      INSERT OR REPLACE INTO firmware_versions (device_prefix, latest_version, updated_at)
+      VALUES (?, ?, CURRENT_TIMESTAMP)
+    `).run(prefix, latestVersion);
+  },
+
+  delete: (prefix: string): void => {
+    db.prepare('DELETE FROM firmware_versions WHERE device_prefix = ?').run(prefix);
+  },
+
+  // Helper to check if an update is available based on version comparison
+  isUpdateAvailable: (currentFirmware: string | null): { available: boolean; latestVersion: string | null } => {
+    if (!currentFirmware) return { available: false, latestVersion: null };
+
+    const latestVersion = firmwareVersionDb.getLatestForFirmware(currentFirmware);
+    if (!latestVersion) return { available: false, latestVersion: null };
+
+    // Compare versions - firmware format: XXX_R_00.07.06.20
+    // Extract version numbers for comparison
+    const currentMatch = currentFirmware.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    const latestMatch = latestVersion.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+
+    if (!currentMatch || !latestMatch) {
+      // Fallback to string comparison
+      return { available: currentFirmware !== latestVersion, latestVersion };
+    }
+
+    // Compare version numbers
+    for (let i = 1; i <= 4; i++) {
+      const curr = parseInt(currentMatch[i], 10);
+      const latest = parseInt(latestMatch[i], 10);
+      if (latest > curr) return { available: true, latestVersion };
+      if (curr > latest) return { available: false, latestVersion };
+    }
+
+    return { available: false, latestVersion };
   }
 };
