@@ -235,6 +235,15 @@ export const settingsDb = {
   setGlobalCredentials: (username: string, password: string): void => {
     settingsDb.set('global_username', username);
     settingsDb.set('global_password', password);
+  },
+
+  getBatchWaitTime: (): number => {
+    const value = settingsDb.get('batch_wait_time');
+    return value ? parseInt(value, 10) : 10; // Default 10 minutes
+  },
+
+  setBatchWaitTime: (minutes: number): void => {
+    settingsDb.set('batch_wait_time', minutes.toString());
   }
 };
 

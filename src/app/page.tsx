@@ -80,6 +80,10 @@ export default function Home() {
   const [newFwPrefix, setNewFwPrefix] = useState('');
   const [newFwVersion, setNewFwVersion] = useState('');
 
+  // Batch settings
+  const [batchWaitTime, setBatchWaitTime] = useState(10);
+  const [includeErrors, setIncludeErrors] = useState(false);
+
   // Tab state
   const [activeTab, setActiveTab] = useState<'dashboard' | 'routers' | 'history' | 'settings'>('dashboard');
 
@@ -221,6 +225,9 @@ export default function Home() {
       if (data.username) {
         setGlobalUsername(data.username);
       }
+      if (data.batchWaitTime !== undefined) {
+        setBatchWaitTime(data.batchWaitTime);
+      }
     } catch (error) {
       console.error('Failed to fetch settings:', error);
     }
@@ -346,13 +353,14 @@ export default function Home() {
       const res = await fetch('/api/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ routerIds, batchSize })
+        body: JSON.stringify({ routerIds, batchSize, includeErrors })
       });
       const data = await res.json();
 
       if (data.success) {
         setMessage({ type: 'success', text: `Update-Job gestartet: ${data.totalRouters} Router in Batches von ${data.batchSize}` });
         setSelectedRouters(new Set());
+        setIncludeErrors(false); // Reset after starting
         fetchActiveJob();
       } else {
         setMessage({ type: 'error', text: data.error });
@@ -571,10 +579,23 @@ export default function Home() {
                     <option value={100}>100 pro Batch</option>
                   </select>
 
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={includeErrors}
+                      onChange={e => setIncludeErrors(e.target.checked)}
+                      className="rounded"
+                    />
+                    <span className="text-gray-300">
+                      + Fehlgeschlagene ({stats.find(s => s.status === 'error')?.count || 0})
+                    </span>
+                  </label>
+
                   <button
                     onClick={handleStartUpdate}
                     disabled={isLoading || activeJob !== null ||
-                      (stats.find(s => s.status === 'update_available')?.count || 0) === 0}
+                      ((stats.find(s => s.status === 'update_available')?.count || 0) === 0 &&
+                       (!includeErrors || (stats.find(s => s.status === 'error')?.count || 0) === 0))}
                     className="bg-orange-600 hover:bg-orange-700 px-4 py-2 rounded disabled:opacity-50"
                   >
                     Updates starten
@@ -855,20 +876,58 @@ export default function Home() {
             <div className="bg-gray-800 p-6 rounded-lg max-w-lg">
               <h3 className="text-lg font-semibold mb-4">Batch-Einstellungen</h3>
               <p className="text-gray-400 mb-4">
-                Nach jedem Batch wird 10 Minuten gewartet, bevor der nächste Batch startet.
+                Nach jedem Batch wird gewartet, bevor der nächste Batch startet.
               </p>
-              <div>
-                <label className="block text-sm font-medium mb-1">Standard Batch-Größe</label>
-                <select
-                  value={batchSize}
-                  onChange={e => setBatchSize(Number(e.target.value))}
-                  className="bg-gray-700 border border-gray-600 rounded px-3 py-2"
-                >
-                  <option value={5}>5 Router pro Batch</option>
-                  <option value={10}>10 Router pro Batch</option>
-                  <option value={25}>25 Router pro Batch</option>
-                  <option value={100}>100 Router pro Batch</option>
-                </select>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Standard Batch-Größe</label>
+                  <select
+                    value={batchSize}
+                    onChange={e => setBatchSize(Number(e.target.value))}
+                    className="bg-gray-700 border border-gray-600 rounded px-3 py-2"
+                  >
+                    <option value={5}>5 Router pro Batch</option>
+                    <option value={10}>10 Router pro Batch</option>
+                    <option value={25}>25 Router pro Batch</option>
+                    <option value={100}>100 Router pro Batch</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Wartezeit zwischen Batches (Minuten)</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      min="0"
+                      max="60"
+                      value={batchWaitTime}
+                      onChange={e => setBatchWaitTime(Number(e.target.value))}
+                      className="bg-gray-700 border border-gray-600 rounded px-3 py-2 w-24"
+                    />
+                    <button
+                      onClick={async () => {
+                        try {
+                          const res = await fetch('/api/settings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ batchWaitTime })
+                          });
+                          const data = await res.json();
+                          if (data.success) {
+                            setMessage({ type: 'success', text: `Wartezeit auf ${batchWaitTime} Minuten gesetzt` });
+                          } else {
+                            setMessage({ type: 'error', text: data.error });
+                          }
+                        } catch {
+                          setMessage({ type: 'error', text: 'Speichern fehlgeschlagen' });
+                        }
+                      }}
+                      className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded"
+                    >
+                      Speichern
+                    </button>
+                  </div>
+                  <p className="text-gray-500 text-sm mt-1">0 = keine Wartezeit</p>
+                </div>
               </div>
             </div>
 

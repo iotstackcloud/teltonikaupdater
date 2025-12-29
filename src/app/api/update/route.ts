@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
-import { routerDb, updateHistoryDb, batchJobDb, settingsDb } from '@/lib/db';
+import { routerDb, updateHistoryDb, batchJobDb, settingsDb, Router } from '@/lib/db';
 import { performUpdate, verifyUpdateAfterReboot } from '@/lib/ssh-service';
 import { updateEvents } from '@/lib/event-emitter';
 
@@ -10,17 +10,28 @@ const activeBatches = new Map<string, { abort: boolean }>();
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { routerIds, batchSize = 5 } = body as { routerIds?: string[]; batchSize?: number };
+    const { routerIds, batchSize = 5, includeErrors = false } = body as {
+      routerIds?: string[];
+      batchSize?: number;
+      includeErrors?: boolean;
+    };
 
     const globalCreds = settingsDb.getGlobalCredentials();
+    const waitTimeMinutes = settingsDb.getBatchWaitTime();
 
     // Get routers to update
-    let routers;
+    let routers: Router[];
     if (routerIds && routerIds.length > 0) {
-      routers = routerIds.map(id => routerDb.getById(id)).filter(Boolean);
+      routers = routerIds.map(id => routerDb.getById(id)).filter((r): r is Router => r !== undefined);
     } else {
       // Get all routers with available updates
       routers = routerDb.getByStatus('update_available');
+
+      // Also include error routers if requested (for retry)
+      if (includeErrors) {
+        const errorRouters = routerDb.getByStatus('error');
+        routers = [...routers, ...errorRouters];
+      }
     }
 
     if (routers.length === 0) {
@@ -50,7 +61,7 @@ export async function POST(request: NextRequest) {
 
     // Start batch process in background
     activeBatches.set(jobId, { abort: false });
-    processBatchUpdate(jobId, routers, batchSize, globalCreds);
+    processBatchUpdate(jobId, routers, batchSize, globalCreds, waitTimeMinutes);
 
     return NextResponse.json({
       success: true,
@@ -125,11 +136,12 @@ export async function DELETE(request: NextRequest) {
 
 async function processBatchUpdate(
   jobId: string,
-  routers: any[],
+  routers: Router[],
   batchSize: number,
-  globalCreds: { username: string; password: string } | null
+  globalCreds: { username: string; password: string } | null,
+  waitTimeMinutes: number
 ) {
-  const WAIT_AFTER_UPDATE_MS = 10 * 60 * 1000; // 10 minutes
+  const WAIT_AFTER_UPDATE_MS = waitTimeMinutes * 60 * 1000;
   const totalBatches = Math.ceil(routers.length / batchSize);
 
   batchJobDb.update(jobId, {
