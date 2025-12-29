@@ -27,10 +27,11 @@ export async function POST(request: NextRequest) {
       // Get all routers with available updates
       routers = routerDb.getByStatus('update_available');
 
-      // Also include error routers if requested (for retry)
+      // Also include error/unreachable routers if requested (for retry)
       if (includeErrors) {
         const errorRouters = routerDb.getByStatus('error');
-        routers = [...routers, ...errorRouters];
+        const unreachableRouters = routerDb.getByStatus('unreachable');
+        routers = [...routers, ...errorRouters, ...unreachableRouters];
       }
     }
 

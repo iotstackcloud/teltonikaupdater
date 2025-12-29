@@ -587,7 +587,8 @@ export default function Home() {
                       className="rounded"
                     />
                     <span className="text-gray-300">
-                      + Fehlgeschlagene ({stats.find(s => s.status === 'error')?.count || 0})
+                      + Fehlgeschlagene ({(stats.find(s => s.status === 'error')?.count || 0) +
+                        (stats.find(s => s.status === 'unreachable')?.count || 0)})
                     </span>
                   </label>
 
@@ -595,7 +596,8 @@ export default function Home() {
                     onClick={handleStartUpdate}
                     disabled={isLoading || activeJob !== null ||
                       ((stats.find(s => s.status === 'update_available')?.count || 0) === 0 &&
-                       (!includeErrors || (stats.find(s => s.status === 'error')?.count || 0) === 0))}
+                       (!includeErrors || ((stats.find(s => s.status === 'error')?.count || 0) +
+                        (stats.find(s => s.status === 'unreachable')?.count || 0)) === 0))}
                     className="bg-orange-600 hover:bg-orange-700 px-4 py-2 rounded disabled:opacity-50"
                   >
                     Updates starten
