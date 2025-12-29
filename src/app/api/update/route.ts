@@ -28,15 +28,18 @@ export async function POST(request: NextRequest) {
       console.log('[Update API] Using selected routers:', routers.length);
     } else {
       // Get all routers with available updates
-      routers = routerDb.getByStatus('update_available');
-      console.log('[Update API] Routers with update_available:', routers.length);
+      const updateAvailable = routerDb.getByStatus('update_available');
+      console.log('[Update API] Routers with update_available:', updateAvailable.length);
 
       // Also include error/unreachable routers if requested (for retry)
       if (includeErrors) {
         const errorRouters = routerDb.getByStatus('error');
         const unreachableRouters = routerDb.getByStatus('unreachable');
         console.log('[Update API] Adding error routers:', errorRouters.length, 'unreachable:', unreachableRouters.length);
-        routers = [...routers, ...errorRouters, ...unreachableRouters];
+        // Put failed routers FIRST so they get retried before new ones
+        routers = [...errorRouters, ...unreachableRouters, ...updateAvailable];
+      } else {
+        routers = updateAvailable;
       }
     }
 
