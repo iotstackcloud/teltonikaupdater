@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { routerDb, updateHistoryDb, batchJobDb, settingsDb } from '@/lib/db';
-import { performUpdate, verifyUpdateAfterReboot, getFirmwareInfo } from '@/lib/ssh-service';
+import { performUpdate, verifyUpdateAfterReboot } from '@/lib/ssh-service';
+import { updateEvents } from '@/lib/event-emitter';
 
 // Store for active batch processes
 const activeBatches = new Map<string, { abort: boolean }>();
@@ -107,6 +108,13 @@ export async function DELETE(request: NextRequest) {
 
     batchJobDb.update(jobId, { status: 'cancelled' });
 
+    updateEvents.emit({
+      type: 'job_completed',
+      jobId,
+      timestamp: new Date().toISOString(),
+      data: { message: 'Job cancelled by user', status: 'cancelled' }
+    });
+
     return NextResponse.json({ success: true, message: 'Batch job cancelled' });
   } catch (error) {
     return NextResponse.json({
@@ -122,10 +130,23 @@ async function processBatchUpdate(
   globalCreds: { username: string; password: string } | null
 ) {
   const WAIT_AFTER_UPDATE_MS = 10 * 60 * 1000; // 10 minutes
+  const totalBatches = Math.ceil(routers.length / batchSize);
 
   batchJobDb.update(jobId, {
     status: 'running',
     started_at: new Date().toISOString()
+  });
+
+  // Emit job started event
+  updateEvents.emit({
+    type: 'job_started',
+    jobId,
+    timestamp: new Date().toISOString(),
+    data: {
+      message: `Starting update job for ${routers.length} routers`,
+      total: routers.length,
+      totalBatches
+    }
   });
 
   let completedCount = 0;
@@ -135,12 +156,30 @@ async function processBatchUpdate(
   for (let i = 0; i < routers.length; i += batchSize) {
     const batch = activeBatches.get(jobId);
     if (batch?.abort) {
-      console.log(`Batch job ${jobId} aborted`);
+      updateEvents.emit({
+        type: 'job_completed',
+        jobId,
+        timestamp: new Date().toISOString(),
+        data: { message: 'Job aborted', status: 'cancelled', completed: completedCount, failed: failedCount }
+      });
       break;
     }
 
     const currentBatch = routers.slice(i, i + batchSize);
-    console.log(`Processing batch ${Math.floor(i / batchSize) + 1}, routers: ${currentBatch.length}`);
+    const batchNumber = Math.floor(i / batchSize) + 1;
+
+    // Emit batch started event
+    updateEvents.emit({
+      type: 'batch_started',
+      jobId,
+      timestamp: new Date().toISOString(),
+      data: {
+        message: `Starting batch ${batchNumber} of ${totalBatches}`,
+        batchNumber,
+        totalBatches,
+        total: currentBatch.length
+      }
+    });
 
     // Process routers in this batch concurrently
     const batchPromises = currentBatch.map(async (router) => {
@@ -162,17 +201,60 @@ async function processBatchUpdate(
       updateHistoryDb.insert(historyEntry);
       routerDb.updateStatus(router.id, 'updating');
 
+      // Emit router started event
+      updateEvents.emit({
+        type: 'router_started',
+        jobId,
+        timestamp: new Date().toISOString(),
+        data: {
+          routerId: router.id,
+          deviceName: router.device_name,
+          ipAddress: router.ip_address,
+          message: `Starting update for ${router.device_name}`,
+          firmwareBefore: router.current_firmware
+        }
+      });
+
       if (!username || !password) {
+        const error = 'No credentials available';
         updateHistoryDb.update(historyId, {
           status: 'failed',
-          error_message: 'No credentials available',
+          error_message: error,
           completed_at: new Date().toISOString()
         });
         routerDb.updateStatus(router.id, 'error');
+
+        updateEvents.emit({
+          type: 'router_failed',
+          jobId,
+          timestamp: new Date().toISOString(),
+          data: {
+            routerId: router.id,
+            deviceName: router.device_name,
+            ipAddress: router.ip_address,
+            message: `Update failed for ${router.device_name}`,
+            error
+          }
+        });
+
         return { success: false };
       }
 
       try {
+        // Emit progress: downloading
+        updateEvents.emit({
+          type: 'router_progress',
+          jobId,
+          timestamp: new Date().toISOString(),
+          data: {
+            routerId: router.id,
+            deviceName: router.device_name,
+            ipAddress: router.ip_address,
+            message: `Downloading firmware for ${router.device_name}`,
+            status: 'downloading'
+          }
+        });
+
         const result = await performUpdate({
           host: router.ip_address,
           username,
@@ -186,17 +268,42 @@ async function processBatchUpdate(
             completed_at: new Date().toISOString()
           });
           routerDb.updateStatus(router.id, 'error');
+
+          updateEvents.emit({
+            type: 'router_failed',
+            jobId,
+            timestamp: new Date().toISOString(),
+            data: {
+              routerId: router.id,
+              deviceName: router.device_name,
+              ipAddress: router.ip_address,
+              message: `Update failed for ${router.device_name}`,
+              error: result.error
+            }
+          });
+
           return { success: false };
         }
 
-        // Wait for router to come back online and verify update
-        console.log(`Waiting for router ${router.device_name} to reboot...`);
+        // Emit progress: rebooting
+        updateEvents.emit({
+          type: 'router_progress',
+          jobId,
+          timestamp: new Date().toISOString(),
+          data: {
+            routerId: router.id,
+            deviceName: router.device_name,
+            ipAddress: router.ip_address,
+            message: `Waiting for ${router.device_name} to reboot...`,
+            status: 'rebooting'
+          }
+        });
 
         const verification = await verifyUpdateAfterReboot(
           { host: router.ip_address, username, password },
           router.available_firmware,
-          20, // max retries
-          30000 // 30 seconds between retries
+          20,
+          30000
         );
 
         if (verification.success) {
@@ -211,6 +318,21 @@ async function processBatchUpdate(
             null,
             'up_to_date'
           );
+
+          updateEvents.emit({
+            type: 'router_completed',
+            jobId,
+            timestamp: new Date().toISOString(),
+            data: {
+              routerId: router.id,
+              deviceName: router.device_name,
+              ipAddress: router.ip_address,
+              message: `Update completed for ${router.device_name}`,
+              firmwareBefore: router.current_firmware,
+              firmwareAfter: verification.newVersion
+            }
+          });
+
           return { success: true };
         } else {
           updateHistoryDb.update(historyId, {
@@ -219,15 +341,44 @@ async function processBatchUpdate(
             completed_at: new Date().toISOString()
           });
           routerDb.updateStatus(router.id, 'error');
+
+          updateEvents.emit({
+            type: 'router_failed',
+            jobId,
+            timestamp: new Date().toISOString(),
+            data: {
+              routerId: router.id,
+              deviceName: router.device_name,
+              ipAddress: router.ip_address,
+              message: `Update verification failed for ${router.device_name}`,
+              error: verification.error
+            }
+          });
+
           return { success: false };
         }
       } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error';
         updateHistoryDb.update(historyId, {
           status: 'failed',
-          error_message: error instanceof Error ? error.message : 'Unknown error',
+          error_message: errorMsg,
           completed_at: new Date().toISOString()
         });
         routerDb.updateStatus(router.id, 'error');
+
+        updateEvents.emit({
+          type: 'router_failed',
+          jobId,
+          timestamp: new Date().toISOString(),
+          data: {
+            routerId: router.id,
+            deviceName: router.device_name,
+            ipAddress: router.ip_address,
+            message: `Update error for ${router.device_name}`,
+            error: errorMsg
+          }
+        });
+
         return { success: false };
       }
     });
@@ -245,10 +396,56 @@ async function processBatchUpdate(
       failed_routers: failedCount
     });
 
+    // Emit batch completed event
+    updateEvents.emit({
+      type: 'batch_completed',
+      jobId,
+      timestamp: new Date().toISOString(),
+      data: {
+        message: `Batch ${batchNumber} completed`,
+        batchNumber,
+        totalBatches,
+        completed: batchCompleted,
+        failed: batchFailed
+      }
+    });
+
+    // Emit job progress
+    updateEvents.emit({
+      type: 'job_progress',
+      jobId,
+      timestamp: new Date().toISOString(),
+      data: {
+        message: `Progress: ${completedCount + failedCount} of ${routers.length} routers processed`,
+        total: routers.length,
+        completed: completedCount,
+        failed: failedCount,
+        progress: Math.round(((completedCount + failedCount) / routers.length) * 100)
+      }
+    });
+
     // Wait 10 minutes before processing next batch (unless this is the last batch)
     if (i + batchSize < routers.length && !activeBatches.get(jobId)?.abort) {
-      console.log(`Waiting ${WAIT_AFTER_UPDATE_MS / 60000} minutes before next batch...`);
-      await new Promise(resolve => setTimeout(resolve, WAIT_AFTER_UPDATE_MS));
+      const waitMinutes = WAIT_AFTER_UPDATE_MS / 60000;
+
+      // Emit waiting event with countdown
+      for (let remaining = waitMinutes; remaining > 0; remaining--) {
+        if (activeBatches.get(jobId)?.abort) break;
+
+        updateEvents.emit({
+          type: 'batch_waiting',
+          jobId,
+          timestamp: new Date().toISOString(),
+          data: {
+            message: `Waiting ${remaining} minutes before next batch...`,
+            waitTimeRemaining: remaining,
+            batchNumber: batchNumber + 1,
+            totalBatches
+          }
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 60000)); // Wait 1 minute
+      }
     }
   }
 
@@ -259,6 +456,20 @@ async function processBatchUpdate(
     completed_at: new Date().toISOString()
   });
 
+  // Emit job completed event
+  updateEvents.emit({
+    type: 'job_completed',
+    jobId,
+    timestamp: new Date().toISOString(),
+    data: {
+      message: `Job ${finalStatus}`,
+      status: finalStatus,
+      total: routers.length,
+      completed: completedCount,
+      failed: failedCount
+    }
+  });
+
   activeBatches.delete(jobId);
-  console.log(`Batch job ${jobId} ${finalStatus}. Completed: ${completedCount}, Failed: ${failedCount}`);
+  updateEvents.cleanup(jobId);
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 interface Router {
   id: string;
@@ -39,6 +39,14 @@ interface UpdateHistory {
   completed_at: string | null;
 }
 
+interface LiveEvent {
+  id: string;
+  type: string;
+  timestamp: string;
+  message: string;
+  level: 'info' | 'success' | 'warning' | 'error';
+}
+
 export default function Home() {
   const [routers, setRouters] = useState<Router[]>([]);
   const [stats, setStats] = useState<{ status: string; count: number }[]>([]);
@@ -49,6 +57,13 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  // Live events state
+  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
+  const [progress, setProgress] = useState<{ completed: number; failed: number; total: number; percent: number } | null>(null);
+  const [waitingTime, setWaitingTime] = useState<number | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
+
   // Settings state
   const [globalUsername, setGlobalUsername] = useState('');
   const [globalPassword, setGlobalPassword] = useState('');
@@ -56,6 +71,105 @@ export default function Home() {
 
   // Tab state
   const [activeTab, setActiveTab] = useState<'dashboard' | 'routers' | 'history' | 'settings'>('dashboard');
+
+  const addLiveEvent = useCallback((type: string, message: string, level: LiveEvent['level'] = 'info') => {
+    const event: LiveEvent = {
+      id: `${Date.now()}-${Math.random()}`,
+      type,
+      timestamp: new Date().toISOString(),
+      message,
+      level
+    };
+    setLiveEvents(prev => [...prev.slice(-99), event]);
+  }, []);
+
+  const connectToEventStream = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+    }
+
+    const eventSource = new EventSource('/api/events');
+    eventSourceRef.current = eventSource;
+
+    eventSource.onmessage = (e) => {
+      try {
+        const event = JSON.parse(e.data);
+        const { type, data } = event;
+
+        switch (type) {
+          case 'job_started':
+            addLiveEvent(type, data.message, 'info');
+            setProgress({ completed: 0, failed: 0, total: data.total || 0, percent: 0 });
+            break;
+
+          case 'job_progress':
+            setProgress({
+              completed: data.completed || 0,
+              failed: data.failed || 0,
+              total: data.total || 0,
+              percent: data.progress || 0
+            });
+            break;
+
+          case 'job_completed':
+            addLiveEvent(type, data.message, data.status === 'completed' ? 'success' : 'warning');
+            setProgress(null);
+            setWaitingTime(null);
+            fetchActiveJob();
+            fetchRouters();
+            fetchHistory();
+            break;
+
+          case 'batch_started':
+            addLiveEvent(type, data.message, 'info');
+            setWaitingTime(null);
+            break;
+
+          case 'batch_completed':
+            addLiveEvent(type, `${data.message} - Erfolgreich: ${data.completed}, Fehlgeschlagen: ${data.failed}`,
+              data.failed > 0 ? 'warning' : 'success');
+            break;
+
+          case 'batch_waiting':
+            setWaitingTime(data.waitTimeRemaining);
+            if (data.waitTimeRemaining === 10 || data.waitTimeRemaining === 5 || data.waitTimeRemaining === 1) {
+              addLiveEvent(type, data.message, 'info');
+            }
+            break;
+
+          case 'router_started':
+            addLiveEvent(type, `[${data.deviceName}] Update gestartet (${data.ipAddress})`, 'info');
+            break;
+
+          case 'router_progress':
+            addLiveEvent(type, `[${data.deviceName}] ${data.message}`, 'info');
+            break;
+
+          case 'router_completed':
+            addLiveEvent(type, `[${data.deviceName}] Update erfolgreich: ${data.firmwareBefore} -> ${data.firmwareAfter}`, 'success');
+            fetchRouters();
+            break;
+
+          case 'router_failed':
+            addLiveEvent(type, `[${data.deviceName}] Fehler: ${data.error}`, 'error');
+            fetchRouters();
+            break;
+        }
+      } catch (err) {
+        console.error('Error parsing event:', err);
+      }
+    };
+
+    eventSource.onerror = () => {
+      console.log('EventSource error, reconnecting...');
+      setTimeout(connectToEventStream, 3000);
+    };
+  }, [addLiveEvent]);
+
+  // Auto-scroll log to bottom
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [liveEvents]);
 
   const fetchRouters = useCallback(async () => {
     try {
@@ -106,17 +220,12 @@ export default function Home() {
     fetchActiveJob();
     fetchHistory();
     fetchSettings();
+    connectToEventStream();
 
-    // Poll for active job status
-    const interval = setInterval(() => {
-      if (activeJob) {
-        fetchActiveJob();
-        fetchRouters();
-      }
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, [fetchRouters, fetchActiveJob, fetchHistory, fetchSettings, activeJob]);
+    return () => {
+      eventSourceRef.current?.close();
+    };
+  }, [fetchRouters, fetchActiveJob, fetchHistory, fetchSettings, connectToEventStream]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -209,6 +318,7 @@ export default function Home() {
 
     setIsLoading(true);
     setMessage(null);
+    setLiveEvents([]);
 
     try {
       const res = await fetch('/api/update', {
@@ -287,6 +397,15 @@ export default function Home() {
     );
   };
 
+  const getEventColor = (level: LiveEvent['level']) => {
+    switch (level) {
+      case 'success': return 'text-green-400';
+      case 'error': return 'text-red-400';
+      case 'warning': return 'text-yellow-400';
+      default: return 'text-gray-300';
+    }
+  };
+
   return (
     <main className="min-h-screen bg-gray-900 text-white">
       {/* Header */}
@@ -307,23 +426,36 @@ export default function Home() {
         </div>
       )}
 
-      {/* Active Job Banner */}
+      {/* Active Job Banner with Progress */}
       {activeJob && activeJob.status === 'running' && (
         <div className="bg-blue-800 p-4">
-          <div className="max-w-7xl mx-auto flex justify-between items-center">
-            <div>
-              <span className="font-bold">Update läuft:</span>{' '}
-              {activeJob.completed_routers + activeJob.failed_routers} / {activeJob.total_routers} Router
-              {activeJob.failed_routers > 0 && (
-                <span className="text-red-300 ml-2">({activeJob.failed_routers} fehlgeschlagen)</span>
-              )}
+          <div className="max-w-7xl mx-auto">
+            <div className="flex justify-between items-center mb-2">
+              <div>
+                <span className="font-bold">Update läuft:</span>{' '}
+                {progress ? `${progress.completed + progress.failed} / ${progress.total}` : `${activeJob.completed_routers + activeJob.failed_routers} / ${activeJob.total_routers}`} Router
+                {(progress?.failed || activeJob.failed_routers) > 0 && (
+                  <span className="text-red-300 ml-2">({progress?.failed || activeJob.failed_routers} fehlgeschlagen)</span>
+                )}
+                {waitingTime && (
+                  <span className="text-yellow-300 ml-4">Warte noch {waitingTime} Min. bis zum nächsten Batch...</span>
+                )}
+              </div>
+              <button
+                onClick={handleCancelJob}
+                className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded"
+              >
+                Abbrechen
+              </button>
             </div>
-            <button
-              onClick={handleCancelJob}
-              className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded"
-            >
-              Abbrechen
-            </button>
+            {progress && (
+              <div className="w-full bg-gray-700 rounded-full h-2">
+                <div
+                  className="bg-green-500 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${progress.percent}%` }}
+                />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -426,6 +558,34 @@ export default function Home() {
                     Updates starten
                   </button>
                 </div>
+              </div>
+            </div>
+
+            {/* Live Log */}
+            <div className="bg-gray-800 p-6 rounded-lg">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-bold">Live-Log</h2>
+                <button
+                  onClick={() => setLiveEvents([])}
+                  className="text-sm text-gray-400 hover:text-white"
+                >
+                  Log leeren
+                </button>
+              </div>
+              <div className="bg-black rounded-lg p-4 h-64 overflow-y-auto font-mono text-sm">
+                {liveEvents.length === 0 ? (
+                  <p className="text-gray-500">Warte auf Events...</p>
+                ) : (
+                  liveEvents.map(event => (
+                    <div key={event.id} className={`${getEventColor(event.level)} mb-1`}>
+                      <span className="text-gray-500">
+                        [{new Date(event.timestamp).toLocaleTimeString('de-DE')}]
+                      </span>{' '}
+                      {event.message}
+                    </div>
+                  ))
+                )}
+                <div ref={logEndRef} />
               </div>
             </div>
 
