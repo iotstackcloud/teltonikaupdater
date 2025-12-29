@@ -32,20 +32,26 @@ class UpdateEventEmitter {
       this.listeners.set(jobId, new Set());
     }
     this.listeners.get(jobId)!.add(callback);
+    console.log(`[EventEmitter] Subscribed to job ${jobId}, total listeners: ${this.listeners.get(jobId)!.size}`);
 
     return () => {
       this.listeners.get(jobId)?.delete(callback);
+      console.log(`[EventEmitter] Unsubscribed from job ${jobId}`);
     };
   }
 
   subscribeAll(callback: EventCallback): () => void {
     this.globalListeners.add(callback);
+    console.log(`[EventEmitter] Global subscriber added, total: ${this.globalListeners.size}`);
     return () => {
       this.globalListeners.delete(callback);
+      console.log(`[EventEmitter] Global subscriber removed`);
     };
   }
 
   emit(event: UpdateEvent): void {
+    console.log(`[EventEmitter] Emitting ${event.type} for job ${event.jobId}, global listeners: ${this.globalListeners.size}`);
+
     // Notify job-specific listeners
     this.listeners.get(event.jobId)?.forEach(callback => {
       try {
@@ -68,6 +74,19 @@ class UpdateEventEmitter {
   cleanup(jobId: string): void {
     this.listeners.delete(jobId);
   }
+
+  getStats(): { globalListeners: number; jobListeners: number } {
+    let jobListeners = 0;
+    this.listeners.forEach(set => jobListeners += set.size);
+    return { globalListeners: this.globalListeners.size, jobListeners };
+  }
 }
 
-export const updateEvents = new UpdateEventEmitter();
+// Use globalThis to ensure singleton across module reloads in Next.js dev mode
+const globalForEvents = globalThis as unknown as { updateEvents: UpdateEventEmitter | undefined };
+
+export const updateEvents = globalForEvents.updateEvents ?? new UpdateEventEmitter();
+
+if (process.env.NODE_ENV !== 'production') {
+  globalForEvents.updateEvents = updateEvents;
+}

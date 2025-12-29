@@ -228,9 +228,20 @@ export async function performUpdate(credentials: SSHCredentials): Promise<Update
       await executeSSHCommand(credentials, 'sysupgrade -c /tmp/firmware.img', 120000);
     } catch (error) {
       // Expected - connection will be closed during reboot
-      if (error instanceof Error && !error.message.includes('closed')) {
-        result.error = `Upgrade command failed: ${error.message}`;
-        return result;
+      // The router outputs "Commencing upgrade. Closing all shell sessions." before rebooting
+      if (error instanceof Error) {
+        const msg = error.message.toLowerCase();
+        const isExpectedDisconnect =
+          msg.includes('closed') ||
+          msg.includes('commencing upgrade') ||
+          msg.includes('closing all shell sessions') ||
+          msg.includes('econnreset') ||
+          msg.includes('connection reset');
+
+        if (!isExpectedDisconnect) {
+          result.error = `Upgrade command failed: ${error.message}`;
+          return result;
+        }
       }
     }
 
