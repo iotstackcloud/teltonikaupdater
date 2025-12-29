@@ -3,9 +3,11 @@ import { routerDb, settingsDb } from '@/lib/db';
 import { getFirmwareInfo, checkRouterConnectivity } from '@/lib/ssh-service';
 
 export async function POST(request: NextRequest) {
+  console.log('[Check API] Received check request');
   try {
     const body = await request.json();
     const { routerIds } = body as { routerIds?: string[] };
+    console.log('[Check API] Checking routers:', routerIds?.length || 'all');
 
     const globalCreds = settingsDb.getGlobalCredentials();
     let routers;

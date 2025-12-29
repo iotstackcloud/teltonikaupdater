@@ -318,15 +318,18 @@ export default function Home() {
   };
 
   const handleCheckFirmware = async (routerIds?: string[]) => {
+    console.log('[Frontend] handleCheckFirmware called with:', routerIds?.length || 'all');
     setIsLoading(true);
     setMessage(null);
 
     try {
+      console.log('[Frontend] Sending check request...');
       const res = await fetch('/api/routers/check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ routerIds })
       });
+      console.log('[Frontend] Check response status:', res.status);
       const data = await res.json();
 
       if (data.success) {
