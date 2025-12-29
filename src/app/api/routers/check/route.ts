@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { routerDb, settingsDb } from '@/lib/db';
+import { routerDb, settingsDb, Router } from '@/lib/db';
 import { getFirmwareInfo, checkRouterConnectivity } from '@/lib/ssh-service';
+
+const CONCURRENT_CHECKS = 10; // Check 10 routers in parallel
 
 export async function POST(request: NextRequest) {
   console.log('[Check API] Received check request');
@@ -10,84 +12,103 @@ export async function POST(request: NextRequest) {
     console.log('[Check API] Checking routers:', routerIds?.length || 'all');
 
     const globalCreds = settingsDb.getGlobalCredentials();
-    let routers;
+    let routers: Router[];
 
     if (routerIds && routerIds.length > 0) {
-      routers = routerIds.map(id => routerDb.getById(id)).filter(Boolean);
+      routers = routerIds.map(id => routerDb.getById(id)).filter((r): r is Router => r !== undefined);
     } else {
       routers = routerDb.getAll();
     }
 
-    const results = [];
+    console.log(`[Check API] Starting check for ${routers.length} routers (${CONCURRENT_CHECKS} parallel)`);
 
-    for (const router of routers) {
-      if (!router) continue;
+    const results: Array<{
+      id: string;
+      device_name: string;
+      status: string;
+      current_firmware?: string | null;
+      available_firmware?: string | null;
+      error?: string;
+    }> = [];
 
-      const username = router.username || globalCreds?.username;
-      const password = router.password || globalCreds?.password;
+    // Process routers in batches for parallel execution
+    for (let i = 0; i < routers.length; i += CONCURRENT_CHECKS) {
+      const batch = routers.slice(i, i + CONCURRENT_CHECKS);
+      console.log(`[Check API] Processing batch ${Math.floor(i / CONCURRENT_CHECKS) + 1}/${Math.ceil(routers.length / CONCURRENT_CHECKS)}`);
 
-      if (!username || !password) {
-        routerDb.updateFirmwareInfo(router.id, null, null, 'error');
-        results.push({
-          id: router.id,
-          device_name: router.device_name,
-          status: 'error',
-          error: 'No credentials available'
-        });
-        continue;
-      }
+      const batchResults = await Promise.all(
+        batch.map(async (router) => {
+          const username = router.username || globalCreds?.username;
+          const password = router.password || globalCreds?.password;
 
-      try {
-        // First check connectivity
-        const isConnected = await checkRouterConnectivity({
-          host: router.ip_address,
-          username,
-          password
-        });
+          if (!username || !password) {
+            routerDb.updateFirmwareInfo(router.id, null, null, 'error');
+            return {
+              id: router.id,
+              device_name: router.device_name,
+              status: 'error',
+              error: 'No credentials available'
+            };
+          }
 
-        if (!isConnected) {
-          routerDb.updateFirmwareInfo(router.id, null, null, 'unreachable');
-          results.push({
-            id: router.id,
-            device_name: router.device_name,
-            status: 'unreachable',
-            error: 'Router not reachable via SSH'
-          });
-          continue;
-        }
+          try {
+            // First check connectivity
+            const isConnected = await checkRouterConnectivity({
+              host: router.ip_address,
+              username,
+              password
+            });
 
-        // Get firmware info
-        const firmwareInfo = await getFirmwareInfo({
-          host: router.ip_address,
-          username,
-          password
-        });
+            if (!isConnected) {
+              routerDb.updateFirmwareInfo(router.id, null, null, 'unreachable');
+              return {
+                id: router.id,
+                device_name: router.device_name,
+                status: 'unreachable',
+                error: 'Router not reachable via SSH'
+              };
+            }
 
-        const status = firmwareInfo.updateAvailable ? 'update_available' : 'up_to_date';
-        routerDb.updateFirmwareInfo(
-          router.id,
-          firmwareInfo.current,
-          firmwareInfo.available,
-          status
-        );
+            // Get firmware info
+            const firmwareInfo = await getFirmwareInfo({
+              host: router.ip_address,
+              username,
+              password
+            });
 
-        results.push({
-          id: router.id,
-          device_name: router.device_name,
-          status,
-          current_firmware: firmwareInfo.current,
-          available_firmware: firmwareInfo.available
-        });
-      } catch (error) {
-        routerDb.updateFirmwareInfo(router.id, null, null, 'error');
-        results.push({
-          id: router.id,
-          device_name: router.device_name,
-          status: 'error',
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-      }
+            const status = firmwareInfo.updateAvailable ? 'update_available' : 'up_to_date';
+            routerDb.updateFirmwareInfo(
+              router.id,
+              firmwareInfo.current,
+              firmwareInfo.available,
+              status
+            );
+
+            console.log(`[Check API] ${router.device_name}: ${status} (${firmwareInfo.current})`);
+
+            return {
+              id: router.id,
+              device_name: router.device_name,
+              status,
+              current_firmware: firmwareInfo.current,
+              available_firmware: firmwareInfo.available
+            };
+          } catch (error) {
+            routerDb.updateFirmwareInfo(router.id, null, null, 'error');
+            return {
+              id: router.id,
+              device_name: router.device_name,
+              status: 'error',
+              error: error instanceof Error ? error.message : 'Unknown error'
+            };
+          }
+        })
+      );
+
+      results.push(...batchResults);
     }
+
+    console.log(`[Check API] Completed checking ${results.length} routers`);
 
     return NextResponse.json({
       success: true,
